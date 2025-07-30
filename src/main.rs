@@ -137,6 +137,7 @@ impl EventHandler for Handler {
             // TODO implement second token (so you can add time with years)
             let mut message_start_index = 2;
             match second_token_type {
+                // TODO : This is ripe for DRY refactoring
                 RemindMeDateTypes::SpecifiedTime { h, min } => {
                     let specified_time = future_datetime.clone();
 

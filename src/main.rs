@@ -4,6 +4,12 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
 
+use chrono::Datelike;
+use chrono::Duration;
+use chrono::Local;
+use chrono::Months;
+use chrono::TimeZone;
+use regex::Captures;
 use serenity::all::CreateMessage;
 use serenity::all::UserId;
 use serenity::async_trait;
@@ -14,9 +20,7 @@ use serenity::prelude::*;
 use dotenv::dotenv;
 use regex::Regex;
 use tokio::runtime::Runtime;
-use chrono::{DateTime, Utc, NaiveDateTime};
-use chrono::format::ParseError;
-
+use chrono::Timelike;
 
 struct Handler {
     tx: Arc<mpsc::Sender<(Context, UserId, String)>>
@@ -25,9 +29,9 @@ struct Handler {
 #[derive(PartialEq, Eq)]
 enum RemindMeDateTypes {
     Invalid,
-    ThreeLetterMonth { d: u32, mon: String, y: u32 },
+    ThreeLetterMonth { d: u32, mon: u32, y: i32 },
     SpecifiedTime{ h: u32, min: u32 },
-    AddedTime{ y: u32, mon: u32, d: u32, h: u32, min: u32 },
+    AddedTime{ y: i32, mon: u32, d: u32, h: u32, min: u32 },
 }
 
 #[async_trait]
@@ -46,11 +50,7 @@ impl EventHandler for Handler {
             }
         }
         if msg.content.starts_with("!remindme") {
-            println!("The message is: {}", msg.content);
             let tokens = msg.content.split(" ").collect::<Vec<&str>>();
-            for token in &tokens {
-                println!("{}", token);
-            }
 
             if tokens.len() < 3 {
                 channel_reply(&msg, &ctx, r"Not enough information, ex: !remindme 3h [message]").await;
@@ -89,31 +89,79 @@ impl EventHandler for Handler {
             }
 
             // Parse time for message
-            let mut year;
-            let mut month = String::new();
-            let mut day;
-            let mut hour;
-            let mut minute;
+            let now_datetime = Local::now();
+            let mut future_datetime = now_datetime.clone();
+
+            println!("Current time: {now_datetime}");
 
             match first_token_type {
-                RemindMeDateTypes::Invalid=>{},
+                RemindMeDateTypes::Invalid => { unreachable!(); }
                 RemindMeDateTypes::ThreeLetterMonth { d, mon, y } => {
-                    year = y;
-                    month = mon;
-                    day = d;
+                    let modified_time = chrono::Local.with_ymd_and_hms(y, mon, d, now_datetime.hour(), now_datetime.minute(), now_datetime.second()).unwrap();
+
+                    if modified_time < now_datetime {
+                        channel_reply(&msg, &ctx, format!("Specified time is not in the future")).await;
+                        return;
+                    }
+                    future_datetime = modified_time;
                 },
                 RemindMeDateTypes::SpecifiedTime { h, min } => {
-                    hour = h;
-                    minute = min;
+                    let specified_time = future_datetime.clone();
+
+                    let month = specified_time.month();
+                    let day = specified_time.day();
+                    let modified_time = chrono::Local.with_ymd_and_hms(specified_time.year(), month, day, h, min, 0).unwrap();
+
+                    if modified_time < now_datetime {
+                        channel_reply(&msg, &ctx, format!("Specified time is not in the future")).await;
+                        return;
+                    }
+                    future_datetime = modified_time;
                 },
                 RemindMeDateTypes::AddedTime { y, mon, d, h, min } => {
+                    // TODO eliminate case where first command token is date and  then second command  token is added time?
+                    //  or first token is added  time then Second token is a date? Should be eliminated just to simplify the program
+                    future_datetime = future_datetime + Duration::hours(h.into());
+                    future_datetime += Duration::minutes(min.into());
+                    future_datetime += Duration::hours(h.into());
+                    future_datetime += Duration::days(d.into());
+                    future_datetime = future_datetime + Months::new(mon);
 
+                    let new_year = future_datetime.year() + y;
+
+                    // TODO error checking
+                    future_datetime = future_datetime.with_year(new_year).unwrap();
                 },
             }
 
+            // TODO implement second token (so you can add time with years)
+            let mut message_start_index = 2;
+            match second_token_type {
+                RemindMeDateTypes::SpecifiedTime { h, min } => {
+                    let specified_time = future_datetime.clone();
+
+                    let month = specified_time.month();
+                    let day = specified_time.day();
+                    let modified_time = chrono::Local.with_ymd_and_hms(specified_time.year(), month, day, h, min, 0).unwrap();
+
+                    if modified_time < now_datetime {
+                        channel_reply(&msg, &ctx, format!("Specified time is not in the future")).await;
+                        return;
+                    }
+
+                    message_start_index = 3;
+                    future_datetime = modified_time;
+                },
+                _ => {},
+                // RemindMeDateTypes::AddedTime { y, mon, d, h, min } => todo!(),
+            }
+
+            println!("Future datetime: {future_datetime}");
+            println!("The message: {}", &tokens[message_start_index..].join(" "));
+            channel_reply(&msg, &ctx, format!("You got it! (Actually not implemented)")).await;
 
             // TODO this will send a date job to the rx later on
-            self.tx.send((ctx, msg.author.id, msg.content)).unwrap();
+            // self.tx.send((ctx, msg.author.id, msg.content)).unwrap();
         }   
     }
 
@@ -197,9 +245,7 @@ async fn main() {
 fn parse_date(str: &str) -> RemindMeDateTypes {
 
     // TODO: Year first date, whatever, do later
-    // let year_first = Regex::new(r"^(\d{4})-(\d{2})-(\d{2})$").unwrap(); // Regex for YYYY-MM-DD format
-    // let is_year_first = year_first.is_match(str);
-
+    // TODO: Refactor function to return result
     if str.is_empty() {
         return RemindMeDateTypes::Invalid;
     }
@@ -207,33 +253,45 @@ fn parse_date(str: &str) -> RemindMeDateTypes {
     // Three letter month 
     // TODO factor out regex strings to different date util file
     // TODO don't use group tags, might be faster?
+    // TODO the captures unwrap shouldn't happen inside is_match but outside it will, should check anyway
+    // TODO the regex should be unit tested
     let three_letter_month_reg = Regex::new(r"^(?<day>\d{1,2})(?<month>\w{3})(?<year>\d{2,4})$").unwrap();
-    let three_letter_month_caps = three_letter_month_reg.captures(str).unwrap();
     if three_letter_month_reg.is_match(str) {
-        let day = str::parse::<u32>(&three_letter_month_caps["day"]).unwrap_or_default();
-        let month = String::from(&three_letter_month_caps["month"]); // TODO should this be &str?
-        let year = str::parse::<u32>(&three_letter_month_caps["year"]).unwrap_or_default();
-        return RemindMeDateTypes::ThreeLetterMonth{ d: day, mon: month, y: year};
+        let three_letter_month_caps = three_letter_month_reg.captures(str).unwrap();
+
+        let day = str::parse::<u32>(&get_cap_or_empty_string(&three_letter_month_caps, "day")).unwrap_or_default();
+        let month = get_cap_or_empty_string(&three_letter_month_caps, "month");
+
+        let month_num = month_to_number(&month);
+        if month_num.is_none() { return RemindMeDateTypes::Invalid }
+
+        let year = str::parse::<i32>(&get_cap_or_empty_string(&three_letter_month_caps, "year")).unwrap_or_default();
+
+
+        return RemindMeDateTypes::ThreeLetterMonth{ d: day, mon: month_num.unwrap(), y: year};
     }
 
     // Specified time
     let specified_time_reg = Regex::new(r"^(?<hour>([0-2])([0-3]))(?<minute>([0-5])(\d))$").unwrap();
-    let specified_time_caps = specified_time_reg.captures(str).unwrap();
     if specified_time_reg.is_match(str) {
-        let hour = str::parse::<u32>(&specified_time_caps["hour"]).unwrap_or_default();
-        let minute= str::parse::<u32>(&specified_time_caps["minute"]).unwrap_or_default();
+        let specified_time_caps = specified_time_reg.captures(str).unwrap();
+
+        let hour = str::parse::<u32>(&get_cap_or_empty_string(&specified_time_caps, "hour")).unwrap_or_default();
+        let minute = str::parse::<u32>(&get_cap_or_empty_string(&specified_time_caps, "minute")).unwrap_or_default();
         return RemindMeDateTypes::SpecifiedTime{ h: hour, min: minute};
     }
 
     // Is added time
-    let added_time_reg = Regex::new(r"^(?(?<year>\d+)[y])?((?<month>\d+)[M])?((?<day>\d)+[d])?((?<hour>\d)+[h])?((?<minute>\d)+[m])?$").unwrap();
-    let added_time_caps = added_time_reg.captures(str).unwrap();
+    // TODO regex definitely needs unit testing, thanks god for the debugger and vim %
+    let added_time_reg = Regex::new(r"^((?<year>\d+)[y])?((?<month>\d+)[M])?((?<day>\d+)[d])?((?<hour>\d+)[h])?((?<minute>\d+)[m])?$").unwrap();
     if added_time_reg.is_match(str) {
-        let year = str::parse::<u32>(&added_time_caps["year"]).unwrap_or_default();
-        let month = str::parse::<u32>(&added_time_caps["month"]).unwrap_or_default();
-        let day = str::parse::<u32>(&added_time_caps["day"]).unwrap_or_default();
-        let hour = str::parse::<u32>(&added_time_caps["hour"]).unwrap_or_default();
-        let minute= str::parse::<u32>(&added_time_caps["minute"]).unwrap_or_default();
+        let added_time_caps = added_time_reg.captures(str).unwrap();
+        let year = str::parse::<i32>(&get_cap_or_empty_string(&added_time_caps, "year")).unwrap_or_default();
+        let month = str::parse::<u32>(&get_cap_or_empty_string(&added_time_caps, "month")).unwrap_or_default();
+        let day = str::parse::<u32>(&get_cap_or_empty_string(&added_time_caps, "day")).unwrap_or_default();
+        let hour = str::parse::<u32>(&get_cap_or_empty_string(&added_time_caps, "hour")).unwrap_or_default();
+        let minute = str::parse::<u32>(&get_cap_or_empty_string(&added_time_caps, "minute")).unwrap_or_default();
+
         return RemindMeDateTypes::AddedTime{ y: year, mon: month, d: day, h: hour, min: minute};
     }
 
@@ -248,4 +306,27 @@ async fn channel_reply(msg: &Message, ctx: &Context, str: impl Into<String>) {
         println!("Error sending message: {why:?}");
     }
     return;
+}
+
+fn month_to_number(mon: &str) -> Option<u32> {
+    match mon.to_ascii_lowercase().as_str() {
+        "jan" => Some(1),
+        "feb" => Some(2),
+        "mar" => Some(3),
+        "apr" => Some(4),
+        "may" => Some(5),
+        "jun" => Some(6),
+        "jul" => Some(7),
+        "aug" => Some(8),
+        "sep" => Some(9),
+        "oct" => Some(10),
+        "nov" => Some(11),
+        "dec" => Some(12),
+        _ => None,
+    }
+}
+
+// TODO check to see if we can fix the lifetime error and return string ref
+fn get_cap_or_empty_string(caps: &Captures<'_>, name: &str) -> String {
+    return String::from(caps.name(name).map_or("", |m| m.as_str()));
 }

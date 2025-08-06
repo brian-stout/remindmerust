@@ -1,11 +1,14 @@
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::env;
+use sorted_insert::SortedInsert;
+use sorted_insert::SortedInsertByKey;
 
 use std::sync::Arc;
-use std::sync::mpsc;
-use std::thread;
 
+use chrono::DateTime;
 use chrono::Datelike;
-use chrono::Duration;
+use chrono::Duration as ChronoDuration;
 use chrono::Local;
 use chrono::Months;
 use chrono::TimeZone;
@@ -19,19 +22,13 @@ use serenity::prelude::*;
 
 use dotenv::dotenv;
 use regex::Regex;
-use tokio::runtime::Runtime;
 use chrono::Timelike;
 
-struct Handler {
-    tx: Arc<mpsc::Sender<(Context, UserId, String)>>
-}
+use tokio::sync::mpsc;
+use tokio::time::{sleep, Duration as TokioDuration};
 
-#[derive(PartialEq, Eq)]
-enum RemindMeDateTypes {
-    Invalid,
-    ThreeLetterMonth { d: u32, mon: u32, y: i32 },
-    SpecifiedTime{ h: u32, min: u32 },
-    AddedTime{ y: i32, mon: u32, d: u32, h: u32, min: u32 },
+struct Handler {
+    tx: Arc<mpsc::Sender<RemindMeJob>>
 }
 
 #[async_trait]
@@ -121,10 +118,10 @@ impl EventHandler for Handler {
                 RemindMeDateTypes::AddedTime { y, mon, d, h, min } => {
                     // TODO eliminate case where first command token is date and  then second command  token is added time?
                     //  or first token is added  time then Second token is a date? Should be eliminated just to simplify the program
-                    future_datetime = future_datetime + Duration::hours(h.into());
-                    future_datetime += Duration::minutes(min.into());
-                    future_datetime += Duration::hours(h.into());
-                    future_datetime += Duration::days(d.into());
+                    future_datetime = future_datetime + ChronoDuration::hours(h.into());
+                    future_datetime += ChronoDuration::minutes(min.into());
+                    future_datetime += ChronoDuration::hours(h.into());
+                    future_datetime += ChronoDuration::days(d.into());
                     future_datetime = future_datetime + Months::new(mon);
 
                     let new_year = future_datetime.year() + y;
@@ -160,9 +157,15 @@ impl EventHandler for Handler {
             println!("Future datetime: {future_datetime}");
             println!("The message: {}", &tokens[message_start_index..].join(" "));
             channel_reply(&msg, &ctx, format!("You got it! (Actually not implemented)")).await;
+            let job = RemindMeJob { date: future_datetime,
+                msg: String::from(&tokens[message_start_index..].join(" ")),
+                ctx: ctx,
+                user_id: msg.author.id,
+                written: false,
+             };
 
             // TODO this will send a date job to the rx later on
-            // self.tx.send((ctx, msg.author.id, msg.content)).unwrap();
+            let _ = self.tx.send(job).await;
         }   
     }
 
@@ -176,6 +179,23 @@ impl EventHandler for Handler {
     }
 }
 
+#[derive(PartialEq, Eq)]
+enum RemindMeDateTypes {
+    Invalid,
+    ThreeLetterMonth { d: u32, mon: u32, y: i32 },
+    SpecifiedTime{ h: u32, min: u32 },
+    AddedTime{ y: i32, mon: u32, d: u32, h: u32, min: u32 },
+}
+
+struct RemindMeJob {
+    date: DateTime<Local>, // TODO: Check to see if Local is appropriate to use (for user in different time zone)
+    msg: String,
+    ctx: Context,
+    user_id: UserId,
+    written: bool
+}
+
+
 async fn send_direct_msg_job(ctx: &Context, user_id: &UserId, msg: &String) {
     println!("Received message: {}", msg);
     let builder = CreateMessage::new().content(msg);
@@ -188,10 +208,11 @@ async fn send_direct_msg_job(ctx: &Context, user_id: &UserId, msg: &String) {
 // TODO: Set up CTRL+C handling
 #[tokio::main]
 async fn main() {
-
     dotenv().ok(); // Reads the .env file
 
     let token = env::var("DISCORD_TOKEN").expect("Expected a token");
+    let rw_vec: Arc<RwLock<Vec<RemindMeJob>>> = Arc::new(RwLock::new(Vec::new()));
+
 
     // match token {
     //     Ok(val) => println!("API_KEY: {:?}", val),
@@ -205,7 +226,7 @@ async fn main() {
 
 
     // Create mpsc channels for IPC
-    let (tx, rx) = mpsc::channel::<(Context, UserId, String)>();
+    let (tx, mut rx) = mpsc::channel::<RemindMeJob>(30);
     let ipc_tx = Arc::new(tx);
 
     // Create a new instance of the Client, logging in as a bot. This will automatically prepend
@@ -213,25 +234,46 @@ async fn main() {
     let mut client =
         Client::builder(&token, intents).event_handler(Handler { tx: ipc_tx.clone()}).await.expect("Err creating client");
 
-    let rx_thread = thread::spawn ( move || {
+    let rw_map_clone = rw_vec.clone();
+    let remindme_job_thread = tokio::spawn(async move {
+        while let Some(job) = rx.recv().await { // Continuously wait for messages
+            println!("Received: {}", job.msg);
+
+            let mut write = rw_map_clone.write().await;
+            write.sorted_insert_asc_by_key(job, |e| &e.date);
+    }
+    });
+
+    let rw_vec_clone = rw_vec.clone();
+    let readme_job_thread = tokio::spawn(async move {
         loop {
-            match rx.recv() {
-                Ok((ctx, user_id, msg)) => {
-                    println!("Received message: {}", msg);
-                        let rt = Runtime::new().unwrap();
-                        // TODO: Figure out how tokio is interacting with the rust thread, I understand that the closure is sync in regular rust thread, but I feel like the actual answer is to just pass the rx not in the closure, but this is the recommend way to handle this online
-                        rt.block_on(async move {
-                            send_direct_msg_job(&ctx, &user_id, &msg).await
-                        });
-                },
-                Err(_) => {
-                    println!("RX Thread closing");
-                    break;
-                },
+            let mut write = rw_vec_clone.write().await;
+            println!("DB!");
+
+            let now = Local::now();
+            for entry in write.iter_mut() {
+                println!("date: {}, msg: {}, written: {}", entry.date, entry.msg, entry.written);
+                if entry.written == false {
+                    if entry.date < now {
+                        entry.written = true;
+                        send_direct_msg_job(&entry.ctx, &entry.user_id, &entry.msg).await;
+                    }
+                }
             }
+            let _ = sleep(TokioDuration::from_secs(10)).await;
         }
     });
-    
+
+    let rw_vec_clone = rw_vec.clone();
+    let deleteme_job_thread = tokio::spawn(async move {
+        loop {
+            let mut write = rw_vec_clone.write().await;
+            write.retain(|entry| entry.written == false);
+            //TODO this time doesn't need to be low
+            let _ = sleep(TokioDuration::from_secs(10)).await;
+        }
+    });
+
     // Finally, start a single shard, and start listening to events.
     //
     // Shards will automatically attempt to reconnect, and will perform exponential backoff until
@@ -240,7 +282,9 @@ async fn main() {
         println!("Client error: {why:?}");
     }
 
-    rx_thread.join().unwrap();
+    let _ = remindme_job_thread.await;
+    let _ = readme_job_thread.await;
+    let _ = deleteme_job_thread.await;
 }
 
 fn parse_date(str: &str) -> RemindMeDateTypes {

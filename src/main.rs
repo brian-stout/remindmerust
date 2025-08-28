@@ -1,5 +1,5 @@
-use std::env;
 use sorted_insert::SortedInsertByKey;
+use std::env;
 
 use std::sync::Arc;
 
@@ -16,17 +16,17 @@ use serenity::model::channel::Message;
 use serenity::model::gateway::Ready;
 use serenity::prelude::*;
 
-use dotenv::dotenv;
 use chrono::Timelike;
+use dotenv::dotenv;
 
 use tokio::sync::mpsc;
-use tokio::time::{sleep, Duration as TokioDuration};
+use tokio::time::{Duration as TokioDuration, sleep};
 
 // User Lib imports
-use date::date_utils::{parse_date, RemindMeDateTypes};
+use date::date_utils::{RemindMeDateTypes, parse_date};
 
 struct Handler {
-    tx: Arc<mpsc::Sender<RemindMeJob>>
+    tx: Arc<mpsc::Sender<RemindMeJob>>,
 }
 
 #[async_trait]
@@ -48,7 +48,12 @@ impl EventHandler for Handler {
             let tokens = msg.content.split(" ").collect::<Vec<&str>>();
 
             if tokens.len() < 3 {
-                channel_reply(&msg, &ctx, r"Not enough information, ex: !remindme 3h [message]").await;
+                channel_reply(
+                    &msg,
+                    &ctx,
+                    r"Not enough information, ex: !remindme 3h [message]",
+                )
+                .await;
                 return;
             }
 
@@ -64,23 +69,38 @@ impl EventHandler for Handler {
 
             // Logic for handling 2nd token when command instead of message
             if second_token_type != RemindMeDateTypes::Invalid {
-              if tokens.len() < 4 {
-                channel_reply(&msg, &ctx, format!("Missing message, ex: !remindme 13APR2026 1300 [message]")).await;
-                return;
-              }  
-              // TODO extrapolate this out to multiple date types to error check this
-              if matches!(first_token_type, RemindMeDateTypes::ThreeLetterMonth{..}) && matches!(second_token_type, RemindMeDateTypes::ThreeLetterMonth{..}) {
-                channel_reply(&msg, &ctx, format!("More than one date provided")).await;
-                return;
-              }
+                if tokens.len() < 4 {
+                    channel_reply(
+                        &msg,
+                        &ctx,
+                        format!("Missing message, ex: !remindme 13APR2026 1300 [message]"),
+                    )
+                    .await;
+                    return;
+                }
+                // TODO extrapolate this out to multiple date types to error check this
+                if matches!(first_token_type, RemindMeDateTypes::ThreeLetterMonth { .. })
+                    && matches!(
+                        second_token_type,
+                        RemindMeDateTypes::ThreeLetterMonth { .. }
+                    )
+                {
+                    channel_reply(&msg, &ctx, format!("More than one date provided")).await;
+                    return;
+                }
 
-              // TODO replace with match and extrapolate out to multiple date types (possibly support !remindme 1300 3d4m?)
-              let first_token_is_time = matches!(first_token_type, RemindMeDateTypes::SpecifiedTime{..}) || matches!(first_token_type, RemindMeDateTypes::AddedTime{..});
-              let second_token_is_time = matches!(second_token_type,RemindMeDateTypes::SpecifiedTime{..}) || matches!(second_token_type, RemindMeDateTypes::AddedTime{..});
-              if first_token_is_time && second_token_is_time {
-                channel_reply(&msg, &ctx, format!("More than one time provided provided")).await;
-                return;
-              }
+                // TODO replace with match and extrapolate out to multiple date types (possibly support !remindme 1300 3d4m?)
+                let first_token_is_time =
+                    matches!(first_token_type, RemindMeDateTypes::SpecifiedTime { .. })
+                        || matches!(first_token_type, RemindMeDateTypes::AddedTime { .. });
+                let second_token_is_time =
+                    matches!(second_token_type, RemindMeDateTypes::SpecifiedTime { .. })
+                        || matches!(second_token_type, RemindMeDateTypes::AddedTime { .. });
+                if first_token_is_time && second_token_is_time {
+                    channel_reply(&msg, &ctx, format!("More than one time provided provided"))
+                        .await;
+                    return;
+                }
             }
 
             // Parse time for message
@@ -90,29 +110,44 @@ impl EventHandler for Handler {
             println!("Current time: {now_datetime}");
 
             match first_token_type {
-                RemindMeDateTypes::Invalid => { unreachable!(); }
+                RemindMeDateTypes::Invalid => {
+                    unreachable!();
+                }
                 RemindMeDateTypes::ThreeLetterMonth { d, mon, y } => {
-                    let modified_time = chrono::Local.with_ymd_and_hms(y, mon, d, now_datetime.hour(), now_datetime.minute(), now_datetime.second()).unwrap();
+                    let modified_time = chrono::Local
+                        .with_ymd_and_hms(
+                            y,
+                            mon,
+                            d,
+                            now_datetime.hour(),
+                            now_datetime.minute(),
+                            now_datetime.second(),
+                        )
+                        .unwrap();
 
                     if modified_time < now_datetime {
-                        channel_reply(&msg, &ctx, format!("Specified time is not in the future")).await;
+                        channel_reply(&msg, &ctx, format!("Specified time is not in the future"))
+                            .await;
                         return;
                     }
                     future_datetime = modified_time;
-                },
+                }
                 RemindMeDateTypes::SpecifiedTime { h, min } => {
                     let specified_time = future_datetime.clone();
 
                     let month = specified_time.month();
                     let day = specified_time.day();
-                    let modified_time = chrono::Local.with_ymd_and_hms(specified_time.year(), month, day, h, min, 0).unwrap();
+                    let modified_time = chrono::Local
+                        .with_ymd_and_hms(specified_time.year(), month, day, h, min, 0)
+                        .unwrap();
 
                     if modified_time < now_datetime {
-                        channel_reply(&msg, &ctx, format!("Specified time is not in the future")).await;
+                        channel_reply(&msg, &ctx, format!("Specified time is not in the future"))
+                            .await;
                         return;
                     }
                     future_datetime = modified_time;
-                },
+                }
                 RemindMeDateTypes::AddedTime { y, mon, d, h, min } => {
                     // TODO eliminate case where first command token is date and  then second command  token is added time?
                     //  or first token is added  time then Second token is a date? Should be eliminated just to simplify the program
@@ -126,7 +161,7 @@ impl EventHandler for Handler {
 
                     // TODO error checking
                     future_datetime = future_datetime.with_year(new_year).unwrap();
-                },
+                }
             }
 
             // TODO implement second token (so you can add time with years)
@@ -138,33 +173,41 @@ impl EventHandler for Handler {
 
                     let month = specified_time.month();
                     let day = specified_time.day();
-                    let modified_time = chrono::Local.with_ymd_and_hms(specified_time.year(), month, day, h, min, 0).unwrap();
+                    let modified_time = chrono::Local
+                        .with_ymd_and_hms(specified_time.year(), month, day, h, min, 0)
+                        .unwrap();
 
                     if modified_time < now_datetime {
-                        channel_reply(&msg, &ctx, format!("Specified time is not in the future")).await;
+                        channel_reply(&msg, &ctx, format!("Specified time is not in the future"))
+                            .await;
                         return;
                     }
 
                     message_start_index = 3;
                     future_datetime = modified_time;
-                },
-                _ => {},
-                // RemindMeDateTypes::AddedTime { y, mon, d, h, min } => todo!(),
+                }
+                _ => {} // RemindMeDateTypes::AddedTime { y, mon, d, h, min } => todo!(),
             }
 
             println!("Future datetime: {future_datetime}");
             println!("The message: {}", &tokens[message_start_index..].join(" "));
-            channel_reply(&msg, &ctx, format!("You got it! (Actually not implemented)")).await;
-            let job = RemindMeJob { date: future_datetime,
+            channel_reply(
+                &msg,
+                &ctx,
+                format!("You got it! (Actually not implemented)"),
+            )
+            .await;
+            let job = RemindMeJob {
+                date: future_datetime,
                 msg: String::from(&tokens[message_start_index..].join(" ")),
                 ctx: ctx,
                 user_id: msg.author.id,
                 written: false,
-             };
+            };
 
             // TODO this will send a date job to the rx later on
             let _ = self.tx.send(job).await;
-        }   
+        }
     }
 
     // Set a handler to be called on the `ready` event. This is called when a shard is booted, and
@@ -182,16 +225,13 @@ struct RemindMeJob {
     msg: String,
     ctx: Context,
     user_id: UserId,
-    written: bool
+    written: bool,
 }
 
-
 async fn send_direct_msg_job(ctx: &Context, user_id: &UserId, msg: &String) {
-    println!("Received message: {}", msg);
     let builder = CreateMessage::new().content(msg);
     if let Err(why) = user_id.direct_message(&ctx.http, builder).await {
-               println!("Err sending help: {why:?}");
-                // let _ = msg.reply(&ctx, "There was an error DMing you help.").await;
+        println!("Err sending message: {why:?}"); // TODO: Logging
     }
 }
 
@@ -203,7 +243,6 @@ async fn main() {
     let token = env::var("DISCORD_TOKEN").expect("Expected a token");
     let rw_vec: Arc<RwLock<Vec<RemindMeJob>>> = Arc::new(RwLock::new(Vec::new()));
 
-
     // match token {
     //     Ok(val) => println!("API_KEY: {:?}", val),
     //     Err(e) => println!("Error API_KEY: {}", e),
@@ -214,24 +253,26 @@ async fn main() {
         | GatewayIntents::DIRECT_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT;
 
-
     // Create mpsc channels for IPC
     let (tx, mut rx) = mpsc::channel::<RemindMeJob>(30);
     let ipc_tx = Arc::new(tx);
 
     // Create a new instance of the Client, logging in as a bot. This will automatically prepend
     // your bot token with "Bot ", which is a requirement by Discord for bot users.
-    let mut client =
-        Client::builder(&token, intents).event_handler(Handler { tx: ipc_tx.clone()}).await.expect("Err creating client");
+    let mut client = Client::builder(&token, intents)
+        .event_handler(Handler { tx: ipc_tx.clone() })
+        .await
+        .expect("Err creating client");
 
     let rw_map_clone = rw_vec.clone();
     let remindme_job_thread = tokio::spawn(async move {
-        while let Some(job) = rx.recv().await { // Continuously wait for messages
+        while let Some(job) = rx.recv().await {
+            // Continuously wait for messages
             println!("Received: {}", job.msg);
 
             let mut write = rw_map_clone.write().await;
             write.sorted_insert_asc_by_key(job, |e| &e.date);
-    }
+        }
     });
 
     let rw_vec_clone = rw_vec.clone();
@@ -242,7 +283,10 @@ async fn main() {
 
             let now = Local::now();
             for entry in write.iter_mut() {
-                println!("date: {}, msg: {}, written: {}", entry.date, entry.msg, entry.written);
+                println!(
+                    "date: {}, msg: {}, written: {}",
+                    entry.date, entry.msg, entry.written
+                );
                 if entry.written == false {
                     if entry.date < now {
                         entry.written = true;
@@ -277,12 +321,8 @@ async fn main() {
     let _ = deleteme_job_thread.await;
 }
 
-
 async fn channel_reply(msg: &Message, ctx: &Context, str: impl Into<String>) {
-    if let Err(why) = msg.channel_id.say(
-        &ctx.http,
-        str
-    ).await {
+    if let Err(why) = msg.channel_id.say(&ctx.http, str).await {
         println!("Error sending message: {why:?}");
     }
     return;
